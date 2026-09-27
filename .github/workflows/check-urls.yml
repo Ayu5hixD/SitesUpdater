@@ -2,44 +2,118 @@ name: Check Provider URLs
 
 on:
   schedule:
-    - cron: '0 * * * *'  # Run every hour at the start of the hour (UTC)
-  workflow_dispatch:      # Allow manual triggering
+    # Every hour at the start of the hour (UTC)
+    - cron: "0 * * * *"
 
-# Set explicit permissions for the GITHUB_TOKEN
+  workflow_dispatch:
+
+# Prevent multiple URL-checker runs from modifying files simultaneously
+concurrency:
+  group: provider-url-checker
+  cancel-in-progress: false
+
 permissions:
   contents: write
 
 jobs:
   check-urls:
     runs-on: ubuntu-latest
-    
+
     steps:
+      # ─────────────────────────────────────
+      # Checkout
+      # ─────────────────────────────────────
       - name: Checkout repository
         uses: actions/checkout@v4
-      
+
+      # ─────────────────────────────────────
+      # Node.js
+      # ─────────────────────────────────────
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: '20'
-      
-      - name: Install dependencies
-        run: npm install axios
+          node-version: "latest"
+          cache: "npm"
 
+      # ─────────────────────────────────────
+      # Install Axios
+      # Don't modify package.json/package-lock.json
+      # ─────────────────────────────────────
+      - name: Install dependencies
+        run: |
+          npm install axios --no-save --package-lock=false
+
+      # ─────────────────────────────────────
+      # Restore URL checker cache
+      # ─────────────────────────────────────
+      - name: Restore URL checker cache
+        uses: actions/cache@v4
+        with:
+          path: .url-cache.json
+          key: url-checker-cache-${{ runner.os }}-${{ github.ref_name }}
+          restore-keys: |
+            url-checker-cache-${{ runner.os }}-
+
+      # ─────────────────────────────────────
+      # Run URL checker
+      #
+      # The script processes:
+      #   urls.json
+      #   embed-urls.json
+      #
+      # Dead/error URLs can make the script exit with
+      # code 1, but we still want to commit any valid
+      # URL updates it already made.
+      # ─────────────────────────────────────
       - name: Run URL checker
-        run: node .github/scripts/url-checker.js
-        
-      # Better approach using git status
+        id: url-checker
+        continue-on-error: true
+        run: |
+          node .github/scripts/url-checker.js \
+            --timeout=15000 \
+            --retries=3 \
+            --concurrency=5 \
+            --max-redirects=5 \
+            --cache-ttl=86400000
+
+      # ─────────────────────────────────────
+      # Show changed files
+      # ─────────────────────────────────────
+      - name: Check for changes
+        run: |
+          echo "Changed files:"
+          git status --short
+
+      # ─────────────────────────────────────
+      # Commit updated provider URLs
+      # ─────────────────────────────────────
       - name: Commit changes if any
         run: |
-          git config --global user.name "GitHub Actions"
-          git config --global user.email "actions@github.com"
-          git add urls.json
-          
-          # Check if there are changes using git status (more reliable)
-          if [[ $(git status --porcelain urls.json) ]]; then
-            echo "Found changes in urls.json, committing..."
-            git commit -m "Update provider URLs [skip ci]"
-            git push
+          git config user.name "GitHub Actions"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          # Only add files that the URL checker is allowed to modify
+          git add urls.json embed-urls.json
+
+          if git diff --cached --quiet; then
+            echo "No provider URL changes detected."
           else
-            echo "No changes detected in urls.json"
+            echo "Provider URL changes detected."
+
+            git commit -m "chore: update provider URLs [skip ci]"
+
+            git push
+          fi
+
+      # ─────────────────────────────────────
+      # Final status
+      # ─────────────────────────────────────
+      - name: Report URL checker status
+        if: always()
+        run: |
+          if [ "${{ steps.url-checker.outcome }}" = "success" ]; then
+            echo "✅ URL checker completed successfully."
+          else
+            echo "⚠️ URL checker reported dead/error URLs."
+            echo "Any valid URL updates have still been committed."
           fi
