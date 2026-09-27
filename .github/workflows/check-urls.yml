@@ -30,15 +30,10 @@ jobs:
       # Node.js
       # ─────────────────────────────────────
       - name: Set up Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v5
         with:
           node-version: "latest"
-          cache: "npm"
 
-      # ─────────────────────────────────────
-      # Install Axios
-      # Don't modify package.json/package-lock.json
-      # ─────────────────────────────────────
       - name: Install dependencies
         run: |
           npm install axios --no-save --package-lock=false
